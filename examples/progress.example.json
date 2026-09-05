@@ -1,0 +1,36 @@
+{
+  "_comment": "虚构示例。search/place 不需要 username；其余入口的账号必须已经 ingest。comment 的 source_key 必须是具体帖子 URL。",
+  "entries": [
+    {
+      "kind": "search",
+      "source_key": "https://www.instagram.com/explore/search/keyword/?q=%E9%A6%99%E6%B8%AF",
+      "status": "in_progress",
+      "cursor": {"last_visible_result": "第 2 屏，最后核对 fictional_seed_hk"}
+    },
+    {
+      "kind": "place",
+      "source_key": "觀塘海濱",
+      "status": "unavailable",
+      "reason": "本次界面搜索结果没有地点分页"
+    },
+    {
+      "username": "fictional_seed_hk",
+      "kind": "following",
+      "status": "in_progress",
+      "cursor": "列表滚动到第 3 屏，最后核对 fictional_shop_03"
+    },
+    {
+      "username": "fictional_seed_hk",
+      "kind": "posts",
+      "status": "done",
+      "cursor": "首页可见 12 篇，已为 FICTIONAL01 建立 comment 待办"
+    },
+    {
+      "username": "fictional_seed_hk",
+      "kind": "comment",
+      "source_key": "https://www.instagram.com/p/FICTIONAL01/",
+      "status": "done",
+      "cursor": {"visible_comments": 18, "expanded_replies": 2}
+    }
+  ]
+}

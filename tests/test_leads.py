@@ -75,7 +75,8 @@ class LeadsTests(unittest.TestCase):
         first = self.add(account)
         second = self.add(account)
         self.assertEqual(first["inserted_accounts"], 1)
-        self.assertEqual(second, {"inserted_accounts": 0, "updated_assessments": 0, "new_sources": 0, "new_evidence": 0, "mode": "learning"})
+        self.assertEqual(second, {"inserted_accounts": 0, "updated_assessments": 0, "new_sources": 0, "new_evidence": 0,
+                                  "new_auto_acceptances": 0, "mode": "learning"})
         later = copy.deepcopy(account)
         later["sources"][0].update(source_key="another_button_label", observed_at="2026-09-06T01:00:00Z")
         self.add(later)
@@ -261,9 +262,9 @@ class LeadsTests(unittest.TestCase):
             leads.export_accounts(self.db, output, "csv")
         all_json = self.base / "all.json"
         self.assertEqual(leads.export_accounts(self.db, all_json, "json", include_all=True)["count"], 2)
-        self.assertEqual(len(json.loads(all_json.read_text())), 2)
+        self.assertEqual(len(json.loads(all_json.read_text(encoding="utf-8"))), 2)
         self.assertEqual(leads.export_accounts(self.db, self.base / "accepted.md", "markdown")["count"], 1)
-        markdown = (self.base / "accepted.md").read_text()
+        markdown = (self.base / "accepted.md").read_text(encoding="utf-8")
         self.assertIn("来源路径", markdown)
         self.assertIn("resident_hk / self_description", markdown)
 
@@ -337,7 +338,7 @@ class LeadsTests(unittest.TestCase):
 
     def test_cli_transaction_rolls_back_invalid_multi_account_import(self):
         payload = self.base / "bad.json"
-        payload.write_text(json.dumps({"accounts": [candidate("fixture_valid"), {"username": "INVALID NAME"}]}))
+        payload.write_text(encoding="utf-8", data=json.dumps({"accounts": [candidate("fixture_valid"), {"username": "INVALID NAME"}]}))
         with contextlib.redirect_stderr(io.StringIO()):
             code = leads.main(["--db", str(self.path), "ingest", str(payload)])
         self.assertEqual(code, 2)
@@ -356,6 +357,249 @@ class LeadsTests(unittest.TestCase):
             with contextlib.redirect_stdout(output):
                 self.assertEqual(leads.main(["--db", str(self.path), command]), 0)
             self.assertIsInstance(json.loads(output.getvalue()), (dict, list))
+
+    def test_batch_list_exposes_open_batches_and_pending_numbers_for_handover(self):
+        self.assertEqual(leads.list_batches(self.db), {"batches": [], "open_batches": []})
+        self.add(candidate("fixture_a", strong=False), candidate("fixture_b", strong=False), candidate("fixture_c", strong=False))
+        first = leads.make_batch(self.db, 2)
+        leads.review(self.db, {"batch_id": first["batch_id"], "reviews": [{"number": 2, "decision": "符合"}]})
+        second = leads.make_batch(self.db, 20)
+        listing = leads.list_batches(self.db)
+        self.assertEqual([b["batch_id"] for b in listing["batches"]], [first["batch_id"], second["batch_id"]])
+        self.assertEqual(listing["batches"][0]["pending_numbers"], [1])
+        self.assertEqual(listing["batches"][0]["reviewed_count"], 1)
+        self.assertEqual(listing["open_batches"], [first["batch_id"], second["batch_id"]])
+        self.feedback(first)
+        self.assertEqual(leads.list_batches(self.db)["open_batches"], [second["batch_id"]])
+        self.assertEqual(leads.stats(self.db)["open_batches"], [second["batch_id"]])
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(leads.main(["--db", str(self.path), "batch", "--list"]), 0)
+        self.assertEqual(json.loads(output.getvalue())["open_batches"], [second["batch_id"]])
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM batches").fetchone()[0], 2)
+
+    def test_forget_erases_every_record_and_refuses_silent_reimport(self):
+        self.add(candidate("fixture_seed"))
+        self.feedback(leads.make_batch(self.db, 20))
+        self.add(candidate("fixture_target", sources=[source("fixture_seed")]),
+                 candidate("fixture_other", sources=[source("fixture_target", "comment", "https://www.instagram.com/p/FIXTURE/")]))
+        batch = leads.make_batch(self.db, 20)
+        self.feedback(batch, "不符合", "fixture reason")
+        leads.write_progress(self.db, {"entries": [{"username": "fixture_target", "kind": "following", "status": "done", "cursor": "x"}]})
+        result = leads.forget(self.db, "@Fixture_Target", "Deletion request from the person")
+        self.assertTrue(result["existed"])
+        self.assertEqual(result["deleted"]["accounts"], 1)
+        self.assertEqual(result["deleted"]["sources_as_seed"], 1)
+        for table in ("accounts", "assessments", "evidence", "progress", "progress_events", "batch_items", "reviews"):
+            self.assertEqual(self.db.execute(f"SELECT COUNT(*) FROM {table} WHERE username='fixture_target'").fetchone()[0], 0, table)
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM sources WHERE username='fixture_target' OR source_account='fixture_target'").fetchone()[0], 0)
+        self.assertNotIn("fixture_target", json.dumps(leads.batch_view(self.db, batch["batch_id"])))
+        self.assertEqual(self.db.execute("PRAGMA foreign_key_check").fetchall(), [])
+        self.assertNotIn("fixture_target", json.dumps([tuple(r) for r in self.db.execute("SELECT * FROM forgotten")]))
+        with self.assertRaisesRegex(ValueError, "forget"):
+            self.add(candidate("fixture_target"))
+        self.assertEqual(leads.stats(self.db)["forgotten"], 1)
+        self.assertIn("fixture_other", self.views())
+        self.assertTrue(leads.forget(self.db, "fixture_target", None, unblock=True)["unblocked"])
+        self.add(candidate("fixture_target"))
+        self.assertFalse(leads.forget(self.db, "fixture_never_seen", "Nothing stored")["existed"])
+        with self.assertRaisesRegex(ValueError, "reason"):
+            leads.forget(self.db, "fixture_other", None)
+
+    def test_merge_handles_rename_and_merging_into_existing_account(self):
+        self.add(candidate("fixture_seed"))
+        self.feedback(leads.make_batch(self.db, 20))
+        old = candidate("fixture_old", strong=False, sources=[source("fixture_seed")])
+        old["ig_user_id"] = "12345"
+        self.add(old, candidate("fixture_child", strong=False, sources=[source("fixture_old", "follower")]))
+        batch = leads.make_batch(self.db, 20)
+        self.feedback(batch, "符合", "human accepted before rename")
+        leads.write_progress(self.db, {"entries": [{"username": "fixture_old", "kind": "posts", "status": "done", "cursor": "all"}]})
+        result = leads.merge(self.db, "fixture_old", "fixture_new", "Instagram rename observed")
+        self.assertFalse(result["merged_into_existing"])
+        views = self.views()
+        self.assertNotIn("fixture_old", views)
+        self.assertEqual(views["fixture_new"]["status"], "accepted")
+        self.assertEqual(views["fixture_new"]["decision_origin"], "human")
+        self.assertEqual(views["fixture_new"]["ig_user_id"], "12345")
+        self.assertEqual(views["fixture_new"]["profile_url"], "https://www.instagram.com/fixture_new/")
+        self.assertEqual(views["fixture_child"]["independent_seeds"], ["fixture_new"])
+        self.assertEqual({i["username"] for i in leads.batch_view(self.db, batch["batch_id"])["items"]}, {"fixture_new", "fixture_child"})
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM evidence WHERE username='fixture_new'").fetchone()[0], 3)
+        self.assertEqual(self.db.execute("SELECT status FROM progress WHERE username='fixture_new' AND kind='posts'").fetchone()[0], "done")
+        self.assertEqual(self.db.execute("PRAGMA foreign_key_check").fetchall(), [])
+        # Merge into an account that already exists: relations and evidence are de-duplicated, human decision preserved.
+        self.add(candidate("fixture_dup", strong=False, sources=[source("fixture_seed"), source("fixture_seed", "follower")]))
+        self.add({"username": "fixture_child", "sources": [source("fixture_dup", "follower")]})
+        merged = leads.merge(self.db, "fixture_dup", "fixture_new", "Same person, duplicate record")
+        self.assertTrue(merged["merged_into_existing"])
+        views = self.views()
+        self.assertEqual(views["fixture_new"]["status"], "accepted")
+        self.assertEqual({(s["kind"], s["source_account"]) for s in views["fixture_new"]["sources"]}, {("following", "fixture_seed"), ("follower", "fixture_seed")})
+        self.assertEqual(len([s for s in views["fixture_child"]["sources"] if s["source_account"] == "fixture_new"]), 1)
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM merge_events").fetchone()[0], 2)
+        with self.assertRaisesRegex(ValueError, "不存在"):
+            leads.merge(self.db, "fixture_dup", "fixture_new", "again")
+        with self.assertRaisesRegex(ValueError, "人工结论不同"):
+            self.add(candidate("fixture_rejected", strong=False))
+            self.feedback(leads.make_batch(self.db, 20), "不符合")
+            leads.merge(self.db, "fixture_rejected", "fixture_new", "conflict")
+
+    def test_ig_user_id_is_validated_and_prevents_duplicate_people(self):
+        first = candidate("fixture_one")
+        first["ig_user_id"] = 987654321
+        self.add(first)
+        self.assertEqual(self.views()["fixture_one"]["ig_user_id"], "987654321")
+        with self.assertRaisesRegex(ValueError, "merge fixture_one fixture_two"):
+            second = candidate("fixture_two")
+            second["ig_user_id"] = "987654321"
+            self.add(second)
+        with self.assertRaisesRegex(ValueError, "不同的 ig_user_id"):
+            changed = candidate("fixture_one")
+            changed["ig_user_id"] = "1"
+            self.add(changed)
+        with self.assertRaisesRegex(ValueError, "数字"):
+            bad = candidate("fixture_three")
+            bad["ig_user_id"] = "abc"
+            self.add(bad)
+        self.add({"username": "fixture_one", "ig_user_id": "987654321"})
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM accounts").fetchone()[0], 1)
+
+    def test_mention_is_a_lead_not_a_seed_relation(self):
+        self.add(candidate("fixture_seed"))
+        self.feedback(leads.make_batch(self.db, 20))
+        self.add(candidate("fixture_mentioned", strong=False, sources=[source("fixture_seed", "mention", "https://www.instagram.com/p/FIXTURE/")]),
+                 candidate("fixture_followed", strong=False, sources=[source("fixture_seed")]))
+        self.assertEqual(self.views()["fixture_mentioned"]["independent_seed_count"], 0)
+        self.assertEqual(self.views()["fixture_followed"]["independent_seed_count"], 1)
+
+    def test_auto_acceptances_are_persisted_and_downgrade_reports_affected_accounts(self):
+        for name in ("fixture_seed_one", "fixture_seed_two"):
+            self.add(candidate(name))
+            self.feedback(leads.make_batch(self.db, 1))
+        self.add(candidate("fixture_early_clear"))
+        self.assertEqual(self.views()["fixture_early_clear"]["status"], "pending")
+        upgrade = leads.set_mode(self.db, "assisted", "Two complete human feedback batches")
+        self.assertEqual(upgrade["new_auto_acceptances"], 1)
+        self.assertEqual(self.views()["fixture_early_clear"]["status"], "accepted")
+        rows = {r[0]: r[1] for r in self.db.execute("SELECT username, trigger FROM auto_acceptances")}
+        self.assertEqual(rows, {"fixture_early_clear": "mode_change"})
+        result = self.add(candidate("fixture_later_clear"), candidate("fixture_weak", strong=False))
+        self.assertEqual(result["new_auto_acceptances"], 1)
+        self.assertEqual(self.db.execute("SELECT trigger FROM auto_acceptances WHERE username='fixture_later_clear'").fetchone()[0], "ingest")
+        self.assertEqual(leads.stats(self.db)["auto_acceptances"], 2)
+        self.assertEqual(leads.stats(self.db)["auto_acceptances_needing_review"], [])
+        # A weaker re-assessment flips the status; the earlier automatic acceptance is now flagged for review.
+        self.add(candidate("fixture_later_clear", strong=False))
+        self.assertEqual(self.views()["fixture_later_clear"]["status"], "pending")
+        self.assertTrue(self.views()["fixture_later_clear"]["auto_acceptance_needs_review"])
+        self.assertEqual(leads.stats(self.db)["auto_acceptances_needing_review"], ["fixture_later_clear"])
+        downgrade = leads.set_mode(self.db, "learning", "Too many corrections")
+        self.assertEqual(downgrade["auto_accepted_now_pending"], ["fixture_early_clear", "fixture_later_clear"])
+        self.assertEqual(self.views()["fixture_early_clear"]["status"], "pending")
+        self.assertTrue(self.views()["fixture_early_clear"]["auto_accepted_before"])
+        self.assertFalse(self.views()["fixture_seed_one"]["auto_accepted_before"])
+
+    def test_failed_criteria_are_recorded_and_aggregated(self):
+        self.add(candidate("fixture_a"), candidate("fixture_b"), candidate("fixture_c"))
+        batch = leads.make_batch(self.db, 20)
+        leads.review(self.db, {"batch_id": batch["batch_id"], "reviews": [
+            {"number": 1, "decision": "不符合", "reason": "female per bio", "failed_criteria": ["male"]},
+            {"number": 2, "decision": "不符合", "failed_criteria": ["resident_hk", "male"]},
+            {"number": 3, "decision": "不符合"}]})
+        view = leads.batch_view(self.db, batch["batch_id"])
+        self.assertEqual(view["items"][1]["reviews"][0]["failed_criteria"], ["male", "resident_hk"])
+        counts = leads.stats(self.db)["human_rejections_by_criterion"]
+        self.assertEqual(counts, {"personal": 0, "male": 2, "resident_hk": 1, "unspecified": 1})
+        with self.assertRaisesRegex(ValueError, "无效项"):
+            leads.review(self.db, {"batch_id": batch["batch_id"], "reviews": [{"number": 1, "decision": "不符合", "failed_criteria": ["age"]}]})
+        with self.assertRaisesRegex(ValueError, "符合的账号"):
+            leads.review(self.db, {"batch_id": batch["batch_id"], "reviews": [{"number": 1, "decision": "符合", "failed_criteria": ["male"]}]})
+        # Same decision with different failed_criteria is a new record, identical one is ignored.
+        leads.review(self.db, {"batch_id": batch["batch_id"], "reviews": [{"number": 3, "decision": "不符合", "failed_criteria": ["personal"]}]})
+        leads.review(self.db, {"batch_id": batch["batch_id"], "reviews": [{"number": 3, "decision": "不符合", "failed_criteria": ["personal"]}]})
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM reviews WHERE number=3").fetchone()[0], 2)
+
+    def test_stats_report_why_pending_accounts_fail_the_automatic_gate(self):
+        self.add(candidate("fixture_unknown_male"), candidate("fixture_weak", residence_signal="flag"))
+        self.add({"username": "fixture_unknown_male", "assessment": {**candidate("fixture_unknown_male")["assessment"], "male": "unknown"},
+                  "evidence": candidate("fixture_unknown_male")["evidence"]})
+        blockers = leads.stats(self.db)["pending_gate_blockers"]
+        self.assertEqual(blockers, {"male:unknown": 1, "resident_hk:weak_signal": 1})
+
+    def test_usernames_reject_reserved_instagram_paths(self):
+        for bad in ("https://www.instagram.com/direct/inbox/", "https://www.instagram.com/explore/tags/hk/",
+                    "https://www.instagram.com/locations/1/", "https://www.instagram.com/accounts/login/", "explore", "reels"):
+            with self.assertRaises(ValueError, msg=bad):
+                leads.username(bad)
+        self.assertEqual(leads.username("https://m.instagram.com/Some.User_1/?hl=zh"), "some.user_1")
+
+    def test_v1_database_is_migrated_with_data_preserved(self):
+        v1_schema = """
+        CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE accounts (username TEXT PRIMARY KEY, profile_url TEXT NOT NULL, assessment_json TEXT NOT NULL, evidence_json TEXT NOT NULL,
+            assessment_hash TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, manual_decision TEXT, manual_reason TEXT, manual_at TEXT);
+        CREATE TABLE assessments (id INTEGER PRIMARY KEY, username TEXT NOT NULL REFERENCES accounts(username), assessment_json TEXT NOT NULL,
+            evidence_json TEXT NOT NULL, assessment_hash TEXT NOT NULL, created_at TEXT NOT NULL);
+        CREATE TABLE evidence (evidence_id TEXT PRIMARY KEY, username TEXT NOT NULL REFERENCES accounts(username), criterion TEXT NOT NULL,
+            signal TEXT NOT NULL, text TEXT NOT NULL, url TEXT NOT NULL, observed_at TEXT NOT NULL);
+        CREATE TABLE sources (source_id TEXT PRIMARY KEY, username TEXT NOT NULL REFERENCES accounts(username), kind TEXT NOT NULL,
+            source_account TEXT NOT NULL, source_url TEXT NOT NULL, source_key TEXT NOT NULL, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL);
+        CREATE TABLE batches (batch_id TEXT PRIMARY KEY, created_at TEXT NOT NULL, mode TEXT NOT NULL);
+        CREATE TABLE batch_items (batch_id TEXT NOT NULL REFERENCES batches(batch_id), number INTEGER NOT NULL,
+            username TEXT NOT NULL REFERENCES accounts(username), snapshot_json TEXT NOT NULL, assessment_hash TEXT NOT NULL,
+            PRIMARY KEY(batch_id, number), UNIQUE(batch_id, username));
+        CREATE TABLE reviews (id INTEGER PRIMARY KEY, batch_id TEXT NOT NULL, number INTEGER NOT NULL,
+            username TEXT NOT NULL REFERENCES accounts(username), decision TEXT NOT NULL, reason TEXT NOT NULL,
+            origin TEXT NOT NULL CHECK(origin = 'human_feedback'), created_at TEXT NOT NULL,
+            FOREIGN KEY(batch_id, number) REFERENCES batch_items(batch_id, number));
+        CREATE TABLE rules (version INTEGER PRIMARY KEY, based_on_batches_json TEXT NOT NULL, rules_json TEXT NOT NULL, reason TEXT NOT NULL, created_at TEXT NOT NULL);
+        CREATE TABLE mode_events (id INTEGER PRIMARY KEY, old_mode TEXT NOT NULL, new_mode TEXT NOT NULL, reason TEXT NOT NULL, completed_batches_json TEXT NOT NULL, created_at TEXT NOT NULL);
+        CREATE TABLE progress (username TEXT NOT NULL REFERENCES accounts(username), kind TEXT NOT NULL, source_key TEXT NOT NULL, status TEXT NOT NULL,
+            cursor_json TEXT NOT NULL, reason TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(username, kind, source_key));
+        CREATE TABLE progress_events (id INTEGER PRIMARY KEY, username TEXT NOT NULL REFERENCES accounts(username), kind TEXT NOT NULL,
+            source_key TEXT NOT NULL, status TEXT NOT NULL, cursor_json TEXT NOT NULL, reason TEXT NOT NULL, created_at TEXT NOT NULL);
+        CREATE TABLE discovery_progress (kind TEXT NOT NULL, source_key TEXT NOT NULL, status TEXT NOT NULL, cursor_json TEXT NOT NULL,
+            reason TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(kind, source_key));
+        CREATE TABLE discovery_progress_events (id INTEGER PRIMARY KEY, kind TEXT NOT NULL, source_key TEXT NOT NULL, status TEXT NOT NULL,
+            cursor_json TEXT NOT NULL, reason TEXT NOT NULL, created_at TEXT NOT NULL);
+        INSERT INTO meta VALUES ('schema_version','1'),('tool','instagram-hk-leads'),('mode','learning');
+        """
+        legacy = self.base / "legacy.sqlite"
+        assessment = json.dumps({"personal": "yes", "male": "yes", "resident_hk": "yes", "confidence": "clear", "reason": "fixture"}, sort_keys=True)
+        with contextlib.closing(sqlite3.connect(legacy)) as db:
+            with db:
+                db.executescript(v1_schema)
+                db.execute("INSERT INTO accounts VALUES ('fixture_legacy','https://www.instagram.com/fixture_legacy/',?, '[]','h','t','t',NULL,NULL,NULL)", (assessment,))
+                db.execute("INSERT INTO batches VALUES ('batch_legacy','t','learning')")
+                db.execute("INSERT INTO batch_items VALUES ('batch_legacy',1,'fixture_legacy','{\"model_eligible\": false}','h')")
+                db.execute("INSERT INTO reviews (batch_id,number,username,decision,reason,origin,created_at) VALUES ('batch_legacy',1,'fixture_legacy','accepted','kept','human_feedback','t')")
+        with self.assertRaisesRegex(ValueError, "旧版本 1"):
+            leads.connect(legacy)
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(leads.main(["--db", str(legacy), "stats"]), 2)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(leads.main(["--db", str(legacy), "migrate"]), 0)
+        self.assertEqual(json.loads(output.getvalue())["migrations_applied"], ["1->2"])
+        with contextlib.closing(leads.connect(legacy)) as db:
+            self.assertEqual(leads.schema_version(db), leads.CURRENT_SCHEMA)
+            self.assertEqual(db.migrations_applied, [])
+            views = {item["username"]: item for item in leads.account_views(db)}
+            self.assertEqual(views["fixture_legacy"]["ig_user_id"], None)
+            self.assertEqual(leads.batch_view(db, "batch_legacy")["items"][0]["reviews"][0]["failed_criteria"], [])
+            self.assertEqual(leads.stats(db)["completed_human_batches"], ["batch_legacy"])
+            self.assertEqual(db.execute("PRAGMA foreign_key_check").fetchall(), [])
+            leads.ingest(db, {"accounts": [{**candidate("fixture_after"), "ig_user_id": "42"}]})
+            leads.forget(db, "fixture_legacy", "fixture erasure")
+            db.commit()
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM forgotten").fetchone()[0], 1)
+        # A database claiming a newer schema than this tool knows is refused, not downgraded.
+        with contextlib.closing(sqlite3.connect(legacy)) as db:
+            with db:
+                db.execute("UPDATE meta SET value='99' WHERE key='schema_version'")
+        with self.assertRaisesRegex(ValueError, "高于"):
+            leads.connect(legacy)
 
 
 if __name__ == "__main__":

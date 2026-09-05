@@ -1,0 +1,119 @@
+{
+  "_comment": "虚构示例，仅展示字段填法。所有用户名、ID、引文均为编造，不能导入真实客户库。",
+  "accounts": [
+    {
+      "username": "fictional_seed_hk",
+      "ig_user_id": "100000000001",
+      "assessment": {
+        "personal": "yes",
+        "male": "yes",
+        "resident_hk": "yes",
+        "confidence": "clear",
+        "reason": "简介自述「住喺觀塘」，近三个月多篇帖子为九龙日常；简介写明 he/him",
+        "rule_version": 0
+      },
+      "evidence": [
+        {
+          "criterion": "resident_hk",
+          "signal": "explicit_residence",
+          "text": "住喺觀塘 · 香港仔",
+          "url": "https://www.instagram.com/fictional_seed_hk/",
+          "observed_at": "2026-09-05T10:12:00+08:00"
+        },
+        {
+          "criterion": "resident_hk",
+          "signal": "recent_hk_life",
+          "text": "2026-08-30 觀塘海濱晨跑 / 2026-08-12 旺角食晚飯 / 2026-07-28 啟德放工",
+          "url": "https://www.instagram.com/p/FICTIONAL01/",
+          "observed_at": "2026-09-05T10:14:00+08:00"
+        },
+        {
+          "criterion": "male",
+          "signal": "self_description",
+          "text": "he/him",
+          "url": "https://www.instagram.com/fictional_seed_hk/",
+          "observed_at": "2026-09-05T10:12:00+08:00"
+        },
+        {
+          "criterion": "personal",
+          "signal": "self_description",
+          "text": "個人帳號，冇廣告，純記錄生活",
+          "url": "https://www.instagram.com/fictional_seed_hk/",
+          "observed_at": "2026-09-05T10:12:00+08:00"
+        }
+      ],
+      "sources": [
+        {
+          "kind": "search",
+          "source_url": "https://www.instagram.com/explore/search/keyword/?q=%E9%A6%99%E6%B8%AF",
+          "source_key": "香港 / accounts",
+          "observed_at": "2026-09-05T10:10:00+08:00"
+        }
+      ]
+    },
+    {
+      "username": "fictional_candidate_02",
+      "assessment": {
+        "personal": "yes",
+        "male": "unknown",
+        "resident_hk": "yes",
+        "confidence": "uncertain",
+        "reason": "在种子帖子下用粤语留言，简介有 🇭🇰，但没有任何性别自述",
+        "rule_version": 0
+      },
+      "evidence": [
+        {
+          "criterion": "resident_hk",
+          "signal": "flag",
+          "text": "🇭🇰 Kwun Tong",
+          "url": "https://www.instagram.com/fictional_candidate_02/",
+          "observed_at": "2026-09-05T10:20:00+08:00"
+        },
+        {
+          "criterion": "personal",
+          "signal": "content_type",
+          "text": "近 12 篇帖子均为个人生活照，无商品或推广",
+          "url": "https://www.instagram.com/fictional_candidate_02/",
+          "observed_at": "2026-09-05T10:20:00+08:00"
+        }
+      ],
+      "sources": [
+        {
+          "kind": "comment",
+          "source_account": "fictional_seed_hk",
+          "source_url": "https://www.instagram.com/p/FICTIONAL01/",
+          "source_key": "https://www.instagram.com/p/FICTIONAL01/",
+          "observed_at": "2026-09-05T10:18:00+08:00"
+        }
+      ]
+    },
+    {
+      "username": "fictional_shop_03",
+      "assessment": {
+        "personal": "no",
+        "male": "unknown",
+        "resident_hk": "yes",
+        "confidence": "clear",
+        "reason": "简介是尖沙咀甜品店，帖子全部为商品图和营业时间",
+        "rule_version": 0
+      },
+      "evidence": [
+        {
+          "criterion": "personal",
+          "signal": "business_profile",
+          "text": "TST Dessert · 營業時間 12:00–22:00 · 訂座 DM",
+          "url": "https://www.instagram.com/fictional_shop_03/",
+          "observed_at": "2026-09-05T10:25:00+08:00"
+        }
+      ],
+      "sources": [
+        {
+          "kind": "following",
+          "source_account": "fictional_seed_hk",
+          "source_url": "https://www.instagram.com/fictional_seed_hk/following/",
+          "observed_at": "2026-09-05T10:24:00+08:00"
+        }
+      ]
+    }
+  ]
+}

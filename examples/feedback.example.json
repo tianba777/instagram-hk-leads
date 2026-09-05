@@ -1,0 +1,8 @@
+{
+  "_comment": "把 batch_id 换成 `batch --limit 20` 实际返回的编号。decision 可写 符合/不符合/不确定；failed_criteria 只在不符合或不确定时填写，取值 personal / male / resident_hk。",
+  "batch_id": "batch_REPLACE_ME",
+  "reviews": [
+    {"number": 1, "decision": "不符合", "reason": "用户原话：这是间甜品店", "failed_criteria": ["personal"]},
+    {"number": 2, "decision": "不确定", "reason": "", "failed_criteria": ["male"]}
+  ]
+}

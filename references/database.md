@@ -8,10 +8,14 @@
 
 ```bash
 python3 scripts/leads.py --db data/leads.sqlite init
+python3 scripts/leads.py --db data/leads.sqlite migrate                 # 旧版本数据库升级结构
 python3 scripts/leads.py --db data/leads.sqlite ingest observed.json
 python3 scripts/leads.py --db data/leads.sqlite batch --limit 20
+python3 scripts/leads.py --db data/leads.sqlite batch --list            # 全部批次及未反馈编号
 python3 scripts/leads.py --db data/leads.sqlite batch --batch-id batch_ID
 python3 scripts/leads.py --db data/leads.sqlite review feedback.json
+python3 scripts/leads.py --db data/leads.sqlite merge old_name new_name --reason 'IG 改名'
+python3 scripts/leads.py --db data/leads.sqlite forget some_name --reason '本人要求删除'
 python3 scripts/leads.py --db data/leads.sqlite list
 python3 scripts/leads.py --db data/leads.sqlite list --status pending
 python3 scripts/leads.py --db data/leads.sqlite next --limit 20
@@ -28,7 +32,14 @@ python3 scripts/leads.py --db data/leads.sqlite export --format markdown --outpu
 
 命令输出 JSON，失败时向 stderr 输出 `{"error":"..."}` 并返回退出码 2。除 `init` 外，数据库不存在时直接报错，不创建空文件；`init` 对本工具数据库可重复执行，对已有其他数据库或非空普通文件在写入前拒绝。一次 `ingest`、`review` 或 `progress` 文件中的修改是一个事务，其中任何一项无效都会全部回退。
 
+**结构版本**：`meta.schema_version` 当前为 2。打开旧版本数据库时，普通命令会拒绝并提示先运行 `migrate`（或 `init`）；升级按版本逐步执行、每一步一个事务并做外键检查，返回 `migrations_applied`。升级前请备份文件。比工具更新的数据库会被拒绝而不是降级。
+
 `export` 默认只导出入选名单；显式加 `--all` 才包括待定和人工排除项。导出不覆盖已有文件，请为新版本选新文件名。
+
+### 改名与删除
+
+- `merge OLD NEW --reason`：Instagram 用户改名时，把 OLD 的判断、证据、来源、进度、批次条目和人工结论整体并入 NEW。NEW 已存在时保留较新的模型判断和已有的人工结论；两者人工结论不同或 `ig_user_id` 不同则拒绝。批次编号不变，快照里的用户名一并改写。
+- `forget NAME --reason`：删除该账号的全部记录，包括它作为种子出现在别人来源里的记录和其他账号快照中指向它的来源；只保留用户名的加盐哈希，之后 `ingest` 同名会被拒绝，`forget NAME --unblock` 解除。这是响应本人删除要求的入口，不是清理无用候选的手段。
 
 ## 导入账号与发现来源
 
@@ -40,6 +51,7 @@ python3 scripts/leads.py --db data/leads.sqlite export --format markdown --outpu
     {
       "username": "fictional_candidate",
       "profile_url": "https://www.instagram.com/fictional_candidate/",
+      "ig_user_id": "100000000000",
       "assessment": {
         "personal": "unknown",
         "male": "unknown",
@@ -71,7 +83,8 @@ python3 scripts/leads.py --db data/leads.sqlite export --format markdown --outpu
 }
 ```
 
-- `username` 与 `profile_url` 至少提供一个；同时提供时必须一致。用户名去掉开头 `@` 并转成小写，主页 URL 由用户名规范化，帖子 URL 不接受为主页。
+- `username` 与 `profile_url` 至少提供一个；同时提供时必须一致。用户名去掉开头 `@` 并转成小写，主页 URL 由用户名规范化，帖子 URL 和 `explore`、`direct`、`locations` 等保留路径不接受为主页。
+- `ig_user_id` 可选，是 Instagram 的数字用户 ID（页面源码或 API 响应里可见）。用户名会改，ID 不会：同一 ID 出现在不同用户名下时 `ingest` 会拒绝并提示 `merge`；已有账号记录了不同 ID 也会拒绝。能拿到就填。
 - `assessment.personal/male/resident_hk` 分别取 `yes`、`no`、`unknown`；`confidence` 取 `clear` 或 `uncertain`。这三项始终是模型判断，人工最终结论另外保存；不添加年龄门槛。
 - `assessment.rule_version` 可记录本次实际参考的规则版本，0 表示尚无反馈规则。工具保存该标记，不会据此假称模型已执行或学会自然语言规则。
 - 新提交 `assessment` 时必须同批携带其依据 `evidence`；工具不会偷偷用旧判断的证据支持新判断。只新增来源时可以仅传 `username` 与 `sources`，原判断保持不变。
@@ -98,16 +111,18 @@ python3 scripts/leads.py --db data/leads.sqlite export --format markdown --outpu
 | `following` | 从 `source_account` 的关注列表发现该候选：种子关注候选。 |
 | `follower` | 从 `source_account` 的粉丝列表发现该候选：候选关注种子。 |
 | `comment` / `reply` | 候选在来源帖子发表评论／回复；来源帖子与种子账号分别记录。 |
-| `mention` | 来源账号／内容提及候选，保留实际提及页面。 |
+| `mention` | 来源账号／内容提及候选，保留实际提及页面。**只是线索，不计入种子数。** |
 | `search` / `place` | 从查询或地点入口发现候选；不假设社交关系。 |
 
 相同候选、入口种类、种子账号与入口标识的重复观察只更新首次／最近看到的时间，不增加来源条数；关注和粉丝各自采用固定入口标识。Instagram URL 只移除 `igsh`、`igshid`、`utm_*`、`fbclid`、`gclid` 等追踪参数，保留 `q`、`keywords`、`comment_id` 等业务参数。
 
-优先级按**不同的当前合格种子账号数**排序；同一种子多次评论，或通过其关注、粉丝、评论三种路径重复找到，仍只算一个独立种子。只有人工入选账号，或在当前模式下通过固定检查的账号，才计入合格种子；候选本人和未确认来源不加分。关系方向全部保留，来源数既不是居港概率，也不能把人工排除项救回名单。
+优先级按**不同的当前合格种子账号数**排序；同一种子多次评论，或通过其关注、粉丝、评论三种路径重复找到，仍只算一个独立种子。只有人工入选账号，或在当前模式下通过固定检查的账号，通过 `following` / `follower` / `comment` / `reply` 关系指向候选时才计入；`mention`、候选本人和未确认来源不加分。关系方向全部保留，来源数既不是居港概率，也不能把人工排除项救回名单。
 
 ## 稳定编号与人工反馈
 
-`batch --limit 20` 创建稳定的 `batch_id`，并为这一批的每个账号保存固定 `number`、当时的模型判断、证据、来源和排序依据。以后导入新账号或修改模型判断，都不改变已发给用户的编号或旧快照；重新查看用 `batch --batch-id ...`。
+`batch --limit 20` 创建稳定的 `batch_id`，并为这一批的每个账号保存固定 `number`、当时的模型判断、证据、来源和排序依据。以后导入新账号或修改模型判断，都不改变已发给用户的编号或旧快照（仅 `forget` / `merge` 会改写快照中的用户名）；重新查看用 `batch --batch-id ...`。
+
+`batch --list` 列出全部批次、每批条数、已反馈条数和 `pending_numbers`；`open_batches` 也出现在 `stats` 里。换一个 agent 接手时先看它，再把用户的“1、3 符合”对应到正确的批次。
 
 默认批次只选择 `pending` 账号，不把自动入选账号全部重新要求审核；已经在未完成批次里的账号也不重复分配。对人工 `不确定` 的账号，只有出现新的判断／证据快照后才再次进入普通批次。需要刻意复核已审核或自动入选账号时，使用 `batch --include-reviewed --limit 20`；这不会删除旧记录。可用候选不足 20 时只返回真实数量，不补造账号。
 
@@ -118,13 +133,13 @@ python3 scripts/leads.py --db data/leads.sqlite export --format markdown --outpu
   "batch_id": "batch_ID",
   "reviews": [
     {"number": 1, "decision": "符合"},
-    {"number": 2, "decision": "不符合", "reason": "用户提供的原话或忠实简述"},
-    {"number": 3, "decision": "不确定", "reason": ""}
+    {"number": 2, "decision": "不符合", "reason": "用户提供的原话或忠实简述", "failed_criteria": ["personal"]},
+    {"number": 3, "decision": "不确定", "reason": "", "failed_criteria": ["male"]}
   ]
 }
 ```
 
-`decision` 也接受 `accepted`、`rejected`、`uncertain`。人工结论优先于后续任何模型导入：符合可入选并扩展，不符合排除，不确定仍为 `pending`；后续出现更多来源不会覆盖人工结论。用户明确纠正旧结论时，可对原批次编号再次提交新反馈；历史追加保存，完全相同的重复反馈不再添加一条记录。
+`decision` 也接受 `accepted`、`rejected`、`uncertain`。`failed_criteria` 可选，取 `personal` / `male` / `resident_hk` 的子集，表示用户否决或存疑的是哪一项；`符合` 不能带它。用户没说清楚就不填，`stats.human_rejections_by_criterion.unspecified` 会记录未拆分的否决数。这是“学习”能按条件统计错误的唯一输入。人工结论优先于后续任何模型导入：符合可入选并扩展，不符合排除，不确定仍为 `pending`；后续出现更多来源不会覆盖人工结论。用户明确纠正旧结论时，可对原批次编号再次提交新反馈；历史追加保存，完全相同的重复反馈不再添加一条记录。
 
 `review` 专门记录真实用户反馈，不能让 agent 生成“人工审核结果”或把自动判断转录成反馈。数据库中的 `origin=human_feedback` 是操作约定和审计记录，**不是鉴别人类身份的技术保证**；调用者必须遵守真实反馈的来源边界。
 
@@ -135,6 +150,10 @@ python3 scripts/leads.py --db data/leads.sqlite export --format markdown --outpu
 - `automatic`：通过同一套固定检查的账号可入选并扩展，agent 不逐个要求审批；未知或证据不足的账号保留待定，继续处理其他可做的入口。
 
 `assisted` 与 `automatic` 在本工具里的硬性入选检查相同，差别在 agent 与用户的审核节奏。工具不会自动升级模式；提高自动程度必须显式调用 `mode`、给出理由，并已有至少两个完整收到人工反馈的批次。**两个批次只是防止单轮就升级，不代表准确率已足够，也不是自动切换的依据**；需要结合实际错误、不同来源覆盖和用户意愿判断，前期人工轮次不限。降级同样记录理由；人工结论保持优先。
+
+**自动入选的审计**：状态是按当前模式实时计算的，所以工具另外把每一次自动入选写进 `auto_acceptances`（用户名、判断哈希、模式、规则版本、触发点 `ingest` 或 `mode_change`）。模式降回 `learning` 时返回 `auto_accepted_now_pending`；重新判断让某个账号不再通过检查时，`stats.auto_acceptances_needing_review` 和 `list` 里的 `auto_acceptance_needs_review` 会标出它，用 `batch --include-reviewed` 复核。
+
+**自动模式在实际数据上是否可行**，看 `stats.pending_gate_blockers`：它统计当前待审账号被固定检查挡住的原因（如 `male:unknown`、`resident_hk:weak_signal`、`personal:no_evidence`）。如果绝大多数都是 `male:unknown`，说明目标定义本身限制了自动化，而不是证据收集不够。
 
 规则总结文件：
 
@@ -203,11 +222,13 @@ python3 scripts/leads.py --db data/leads.sqlite export --format markdown --outpu
 
 ## 导出与数据边界
 
-CSV 的 `status` 和 `decision_origin` 是最终状态及其来源，`model_personal/model_male/model_resident_hk/model_confidence/model_reason` 明确是模型原始预测，不能解释成人工结论。`reason` 使用实际人工理由或当前模型理由，人工没给理由就留空；证据和来源保留为 JSON 文本。
+CSV 的 `status` 和 `decision_origin` 是最终状态及其来源，`ig_user_id` 有则输出，`model_personal/model_male/model_resident_hk/model_confidence/model_reason` 明确是模型原始预测，不能解释成人工结论。`reason` 使用实际人工理由或当前模型理由，人工没给理由就留空；证据和来源保留为 JSON 文本。
 
 CSV 对以公式触发字符开头的文本加单引号，包括 `=`、`+`、`-`、`@` 及前置空白／制表符的情况。JSON 保留完整当前记录；Markdown 包含判断来源、理由、来源路径和证据摘要，便于人工复核。
 
-SQLite 保存当前账号判断、历史模型判断、全部去重证据和来源、批次快照、人工反馈历史、规则版本、模式变更和每个入口的进度历史。工具没有任何联系、关注、发帖、评论、登录或后台任务功能；测试只用临时数据库和合成记录。
+SQLite 保存当前账号判断、历史模型判断、全部去重证据和来源、批次快照、人工反馈历史、规则版本、模式变更、自动入选记录、改名记录、删除哈希和每个入口的进度历史。工具没有任何联系、关注、发帖、评论、登录或后台任务功能；测试只用临时数据库和合成记录。
+
+这些都是关于真实个人的资料（含性别、居住地推断和原话引用）。只保留任务需要的最短原文，运行数据不进公开仓库，收到本人删除要求时用 `forget`。
 
 ```bash
 python3 -B -m unittest discover -s tests -v

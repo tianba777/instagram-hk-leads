@@ -1,0 +1,10 @@
+{
+  "_comment": "把 based_on_batches 换成实际已收到人工反馈的批次编号。规则是给 agent 阅读的文本，工具不会执行它。",
+  "based_on_batches": ["batch_REPLACE_ME"],
+  "rules": [
+    "简介含营业时间、订座、DM 下单等字样直接判 personal=no，不进入候选",
+    "只有 🇭🇰 或地名而没有现居自述的，resident_hk 保持 unknown，不提交自动入选",
+    "粤语留言者中 male 仍以 unknown 为主；批次里 male=unknown 的账号先看 bio 是否有 he/him 或自称阿哥、男仔等"
+  ],
+  "reason": "第一批 20 人中 3 个商家被误提交；用户指出 flag 不等于居港"
+}

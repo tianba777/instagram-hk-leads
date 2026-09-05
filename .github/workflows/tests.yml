@@ -1,0 +1,35 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  unittest:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.9", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Run unit tests (standard library only, no network)
+        run: python -B -m unittest discover -s tests -v
+      - name: Smoke-run the CLI on the fictional example data
+        shell: bash
+        run: |
+          set -euo pipefail
+          DB="$RUNNER_TEMP/smoke.sqlite3"
+          python scripts/leads.py --db "$DB" init
+          python scripts/leads.py --db "$DB" ingest examples/observed.example.json
+          python scripts/leads.py --db "$DB" batch --limit 20 > "$RUNNER_TEMP/batch.json"
+          python scripts/leads.py --db "$DB" batch --list
+          python scripts/leads.py --db "$DB" progress examples/progress.example.json
+          python scripts/leads.py --db "$DB" stats > /dev/null
+          python scripts/leads.py --db "$DB" next > /dev/null
+          python scripts/leads.py --db "$DB" export --format markdown --output "$RUNNER_TEMP/accepted.md"
