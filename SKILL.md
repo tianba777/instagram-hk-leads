@@ -9,7 +9,7 @@ description: Build a reviewed list of Hong Kong male personal Instagram accounts
 
 ## 开始前
 
-1. 读 [references/ego-browser.md](references/ego-browser.md)，按已安装版本的官方 skill 调用。本机已验证搜索、地点、主页、部分关系列表和帖子读取，并生成首批审核名单；真实人工反馈与合格种子递归仍未验证。已知可用环境直接开始读取，无须重复版本探测。
+1. 读 [references/ego-browser.md](references/ego-browser.md)，按已安装版本的官方 skill 调用。本机已验证页面读取、候选入库、人工反馈、规则版本保存和通过名单导出；合格种子递归与自动模式仍未验证。已知可用环境直接开始读取，无须重复版本探测。
 2. 确定数据库绝对路径（默认 `<用户工作目录>/instagram-hk-leads-data/leads.sqlite3`），写进交付说明；所有命令都显式传 `--db`。
 3. 新库 `init`；接手已有库先 `stats`、`batch --list`（找回未反馈的批次）、`next`。旧版本库先 `migrate`。
 4. 命令、JSON 格式见 [references/database.md](references/database.md)；填好的样子见 [examples/](examples/README.md)。
@@ -26,7 +26,7 @@ description: Build a reviewed list of Hong Kong male personal Instagram accounts
 
 区分观察时间与帖子发布时间：今天读到几年前的「我住喺香港」，只能记录为历史居住线索，不能使用 `explicit_residence` 表示现在仍居港。保存任务必要的短证据，不收集与筛选无关的个人敏感内容。
 
-**实际判断：** 自动入选要求三项 `yes` 及每项可追溯证据；尚无真实人工反馈时，不能由已读主页数量推算自动通过率或提高审核模式。用 `stats.pending_gate_blockers` 看真实候选缺少哪些依据，资料不足时保留待审。
+**实际判断：** 自动入选要求三项 `yes` 及每项可追溯证据；浏览量、局部人工反馈或规则已保存，都不能单独证明准确率或支持提高审核模式。当前模式、反馈与规则版本以实际数据库 `stats` 为准，不沿用实测说明里的历史进度。用 `stats.pending_gate_blockers` 看真实候选缺少哪些依据，资料不足时保留待审。
 
 ## 寻找循环
 
