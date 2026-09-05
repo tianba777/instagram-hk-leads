@@ -36,6 +36,8 @@ python3 scripts/leads.py --db data/leads.sqlite export --format markdown --outpu
 
 `export` 默认只导出入选名单；显式加 `--all` 才包括待定和人工排除项。导出不覆盖已有文件，请为新版本选新文件名。
 
+旧版本保存过带用户名前缀的帖子证据／来源时，重新导入会按等价 URL 匹配原记录，沿用原 ID；来源仍更新首次／最近看到的时间。仅 URL 写法变化不会新增模型判断或触发一轮重复审核。旧 URL、历史判断及审核批次不回写；观察时间、原文、业务参数或判断实际变化仍正常记录。
+
 ### 改名与删除
 
 - `merge OLD NEW --reason`：Instagram 用户改名时，把 OLD 的判断、证据、来源、进度、批次条目和人工结论整体并入 NEW。NEW 已存在时保留较新的模型判断和已有的人工结论；两者人工结论不同或 `ig_user_id` 不同则拒绝。批次编号不变，快照里的用户名一并改写。
@@ -114,7 +116,7 @@ python3 scripts/leads.py --db data/leads.sqlite export --format markdown --outpu
 | `mention` | 来源账号／内容提及候选，保留实际提及页面。**只是线索，不计入种子数。** |
 | `search` / `place` | 从查询或地点入口发现候选；不假设社交关系。 |
 
-相同候选、入口种类、种子账号与入口标识的重复观察只更新首次／最近看到的时间，不增加来源条数；关注和粉丝各自采用固定入口标识。Instagram URL 只移除 `igsh`、`igshid`、`utm_*`、`fbclid`、`gclid` 等追踪参数，保留 `q`、`keywords`、`comment_id` 等业务参数。
+相同候选、入口种类、种子账号与入口标识的重复观察只更新首次／最近看到的时间，不增加来源条数；关注和粉丝各自采用固定入口标识。Instagram URL 会移除 `igsh`、`igshid`、`utm_*`、`fbclid`、`gclid` 等追踪参数，保留 `q`、`keywords`、`comment_id` 等业务参数。具体帖子链接同时支持根路径与用户名前缀：`/{username}/p/{shortcode}/` 归到 `/p/{shortcode}/`，`/{username}/reel/{shortcode}/` 归到 `/reel/{shortcode}/`；证据、来源和进度中的帖子地址先归一，再参与各自记录的去重；不同证据内容、观察时间或业务参数仍按相应字段处理。
 
 优先级按**不同的当前合格种子账号数**排序；同一种子多次评论，或通过其关注、粉丝、评论三种路径重复找到，仍只算一个独立种子。只有人工入选账号，或在当前模式下通过固定检查的账号，通过 `following` / `follower` / `comment` / `reply` 关系指向候选时才计入；`mention`、候选本人和未确认来源不加分。关系方向全部保留，来源数既不是居港概率，也不能把人工排除项救回名单。
 
@@ -212,7 +214,9 @@ python3 scripts/leads.py --db data/leads.sqlite export --format markdown --outpu
 }
 ```
 
-`search`、`place` 不需要账号，以 `kind + source_key` 单独记录；其余入口要求账号已经导入。关注、粉丝和帖子发现分别用 `following`、`follower`、`posts`；每个评论入口的 `source_key` 必须是具体 Instagram 帖子／Reel URL。`cursor` 可以是字符串或 JSON 对象，只保存界面实际可解释的位置，不伪造分页游标。
+`search`、`place` 不需要账号，以 `kind + source_key` 单独记录；其余入口要求账号已经导入。关注、粉丝和帖子发现分别用 `following`、`follower`、`posts`；每个评论入口的 `source_key` 必须是实际看到的具体 Instagram 帖子／Reel URL；支持 `/{username}/p/{shortcode}/`、`/{username}/reel/{shortcode}/` 等带用户名前缀的形式，由工具归一，不要求 agent 猜造另一条链接。`cursor` 可以是字符串或 JSON 对象，只保存界面实际可解释的位置，不伪造分页游标。
+
+这项用户名前缀支持来自 2026-09-05 的实际页面读取：原工具保存该类评论入口时报错，修复后已把 3 条真实评论进度写入本地数据库并读回。根路径和带用户名前缀的重复记录归一、输入校验等由本地测试覆盖；本次改动不增加数据库结构版本。真实账号与帖子地址只留在本机。
 
 状态为 `pending`、`in_progress`、`done`、`unavailable`；`unavailable` 必须说明原因。`done` 仅表示本轮约定的可见范围已经处理，不保证已经枚举整个平台上的全部数据。发现需要查看的帖子时先为其建立 `comment` 待办，再结束本轮 `posts` 发现；否则尚未登记的帖子无法凭空出现在数据库里。
 

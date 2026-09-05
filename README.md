@@ -10,15 +10,28 @@
 
 | 部分 | 状态 |
 | --- | --- |
-| SQLite 记账工具 `scripts/leads.py` | 已实现，28 个本地测试覆盖；CI 在 Linux / Windows × Python 3.9 / 3.13 上运行 |
+| SQLite 记账工具 `scripts/leads.py` | 已实现，37 个本地测试通过；CI 配置覆盖 Linux / Windows × Python 3.9 / 3.13 |
 | 去重、固定编号批次、人工反馈历史、规则版本、三种审核模式、进度记录、CSV / JSON / Markdown 导出 | 已实现 |
 | `batch --list` 找回未反馈批次、`ig_user_id` 防改名重复、`merge` 改名合并、`forget` 删除请求、自动入选审计、按条件统计人工否决、结构版本迁移 | 已实现（v2） |
-| ego-browser 连接、Instagram 页面实际读取、完整找人流程 | **未实测**。`references/ego-browser.md` 里的示例只是文档契约，首次实测清单见该文件 |
+| ego-browser 连接、搜索建议、候选主页和帖子 | 已在真实 Instagram 页面读取；首页帖子加载失败时，搜索及候选主页仍可使用 |
+| 地点、关注、粉丝及评论入口 | 已读取地点页的 12 个帖子入口、部分关注／粉丝列表、空评论提示和非空评论正文；完整列表、粤语评论者扩展及回复展开未验证 |
+| 实际候选、证据、来源与进度写入 SQLite | 已保存 20 个待审候选，生成固定编号批次和 Markdown 名单；人工通过及自动通过均为 0 |
+| 首次真实人工审核、反馈学习、合格种子递归及自动模式 | **尚未验证**；完整验证范围见 [浏览器实测记录](references/ego-browser.md) |
 | 多 agent 并行、第三方指纹浏览器 | 未实现，也不计划在没有实测数据前做 |
 
-## 一个诚实的预期
+## 真实运行发现与修复
 
-筛选目标里的 `male` 要求本人公开自述，而绝大多数 Instagram 简介不写性别。所以在真实数据上，自动入选（三项 `yes` + 每项可追溯证据）预计很少触发，前几批以人工审核为主是正常的。`stats.pending_gate_blockers` 会统计待审账号被挡在哪一项，审过两三批后用它来决定要不要调整目标，而不是凭感觉。
+2026-09-05 使用 ego-browser 读取 Instagram 时，实际帖子链接带有用户名前缀，例如 `/{username}/p/{shortcode}/` 或 `/{username}/reel/{shortcode}/`。原工具只接受根路径形式，导致保存评论进度失败；现在会把同一帖子的两种链接归到同一个地址，保留判断所需的查询参数并去重。修复已通过真实评论进度写入、读回和 37 个本地测试验证，未改动数据库结构版本。
+
+真实旧数据库的副本还复现了重复证据问题：同样两条旧链接证据重导，计数从 31 变为 33。已补齐旧记录比对，复验保持 31 条；仅链接形式变化也不会新增判断或改变原审核批次。旧记录保留原地址和编号，不执行全库回写。
+
+搜索建议的首屏、页面显示的关注总数以及实际读到的去重人数分别记录；不会把首页框架或 HTTP 200 当作找人完成。一个地点页已能加载并显示 12 个帖子入口，不能因为首页异常就判断地点不可用。上述数量只说明本次验证范围，不是项目的搜索量或层数上限。
+
+本轮查看 28 个主页和 12 个帖子详情，只有 1 个候选的当前模型判断具备三项依据；其余仍需确认。已把历史居住自述的日期核对、私密账号处理、轮播图标误判和 Facebook 留言提示区分补入 skill；这些是实际运行后的操作修正，不冒充从人工反馈学到的规则。
+
+## 审核与学习
+
+前期人工审核轮次不限。自动入选要求个人账号、男性、现居香港三项均有可追溯依据；公开信息不足就保留待核实。`stats.pending_gate_blockers` 可以查看尚未人工处理的候选缺少哪些依据；实际能自动通过多少人，需要用真实审核反馈验证，不能由浏览量或测试数量推算。
 
 ## 寻找方式
 
@@ -71,11 +84,11 @@ python3 scripts/leads.py --db $DB export --format csv --output ../instagram-hk-l
 | 文件 | 用途 |
 | --- | --- |
 | [SKILL.md](SKILL.md) | agent 的筛选标准、寻找循环、模式和边界 |
-| [references/ego-browser.md](references/ego-browser.md) | 浏览器调用、版本差异、首次实测清单 |
+| [references/ego-browser.md](references/ego-browser.md) | 浏览器调用、真实页面读取经验与尚未验证的范围 |
 | [references/database.md](references/database.md) | 命令、JSON 格式及数据库行为 |
 | [examples/](examples/README.md) | 虚构的端到端示例输入与输出 |
 | [scripts/leads.py](scripts/leads.py) | Python / SQLite 命令行工具 |
-| [tests/test_leads.py](tests/test_leads.py) | 使用合成记录和临时数据库的测试 |
+| [tests/](tests/) | 使用合成记录和临时数据库的测试，含真实页面发现的帖子链接形式 |
 
 ## 测试
 
@@ -83,7 +96,7 @@ python3 scripts/leads.py --db $DB export --format csv --output ../instagram-hk-l
 python3 -B -m unittest discover -s tests -v
 ```
 
-测试不访问 Instagram，也不使用真实客户记录；测试通过不能代替浏览器实际运行验证。
+这 37 个测试不访问 Instagram，也不使用真实客户记录；它们验证本地工具行为。上面的浏览器验证来自另行开展的实际读取，两者都不能代替尚未完成的人工审核与种子扩展验证。
 
 ## 数据与合规
 

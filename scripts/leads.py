@@ -187,6 +187,17 @@ def timestamp(value, label):
     return parsed.astimezone(timezone.utc).isoformat()
 
 
+def instagram_post_path(path):
+    """Return one post path for both root links and links prefixed by their owner."""
+    match = re.fullmatch(r"/(?:(?P<owner>[A-Za-z0-9._]{1,30})/)?(?P<kind>p|reel|tv)/(?P<code>[A-Za-z0-9_-]+)/?", path)
+    if not match:
+        return None
+    owner = match["owner"]
+    if owner and (owner.lower() in RESERVED_PATHS or not owner.strip(".")):
+        return None
+    return f"/{match['kind']}/{match['code']}/"
+
+
 def url(value, label="url", optional=False):
     if optional and (value is None or value == ""):
         return ""
@@ -197,7 +208,8 @@ def url(value, label="url", optional=False):
     if parsed.hostname.lower() in INSTAGRAM_HOSTS:
         query = [(key, value) for key, value in parse_qsl(parsed.query, keep_blank_values=True)
                  if key.lower() not in {"igsh", "igshid", "fbclid", "gclid"} and not key.lower().startswith("utm_")]
-        return urlunsplit(("https", "www.instagram.com", parsed.path.rstrip("/") + "/", urlencode(sorted(query)), ""))
+        path = instagram_post_path(parsed.path) or parsed.path.rstrip("/") + "/"
+        return urlunsplit(("https", "www.instagram.com", path, urlencode(sorted(query)), ""))
     return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, parsed.query, ""))
 
 
@@ -472,6 +484,13 @@ def ingest(db, data):
         evidence = incoming_evidence if has_assessment or not existing else json.loads(existing["evidence_json"])
         assessment_hash = digest([assessment, evidence])
         changed = not existing or existing["assessment_hash"] != assessment_hash
+        if existing and changed:
+            previous_hash = digest([json.loads(existing["assessment_json"]),
+                                    normalize_evidence(json.loads(existing["evidence_json"]))])
+            if assessment_hash == previous_hash:
+                # URL spelling alone must not invalidate a previous judgment or its batch review.
+                assessment_hash = existing["assessment_hash"]
+                changed = False
         observed = now()
         if not existing:
             db.execute("INSERT INTO accounts (username,profile_url,assessment_json,evidence_json,assessment_hash,created_at,updated_at,ig_user_id) VALUES (?,?,?,?,?,?,?,?)",
@@ -490,9 +509,18 @@ def ingest(db, data):
         manual = existing["manual_decision"] if existing else None
         if mode != "learning" and not manual and model_gate(assessment, evidence)[0]:
             auto_count += record_auto_acceptance(db, name, assessment_hash, "ingest")
+        known_evidence = set()
+        if incoming_evidence:
+            previous_evidence = [dict(row) for row in db.execute(
+                "SELECT criterion,signal,text,url,observed_at FROM evidence WHERE username=?", (name,))]
+            known_evidence = {digest([name, entry]) for entry in normalize_evidence(previous_evidence)}
         for entry in incoming_evidence:
+            evidence_id = digest([name, entry])
+            if evidence_id in known_evidence:
+                continue
             evidence_count += db.execute("INSERT OR IGNORE INTO evidence VALUES (?,?,?,?,?,?,?)",
-                                         (digest([name, entry]), name, entry["criterion"], entry["signal"], entry["text"], entry["url"], entry["observed_at"])).rowcount
+                                         (evidence_id, name, entry["criterion"], entry["signal"], entry["text"], entry["url"], entry["observed_at"])).rowcount
+            known_evidence.add(evidence_id)
         values = incoming.get("sources", [])
         if not isinstance(values, list):
             fail("sources 必须是列表")
@@ -509,10 +537,15 @@ def ingest(db, data):
                 key = url(key, "sources.source_key")
             seen = timestamp(source.get("observed_at"), "sources.observed_at")
             source_id = digest([name, kind, origin, key])
-            previous = db.execute("SELECT first_seen,last_seen FROM sources WHERE source_id=?", (source_id,)).fetchone()
+            previous = db.execute("SELECT source_id,first_seen,last_seen FROM sources WHERE source_id=?", (source_id,)).fetchone()
+            if previous is None and "://" in key:
+                # Keep legacy source rows and their history; only compare equivalent URLs in memory.
+                previous = next((row for row in db.execute(
+                    "SELECT source_id,source_key,first_seen,last_seen FROM sources WHERE username=? AND kind=? AND source_account=?",
+                    (name, kind, origin)) if "://" in row["source_key"] and url(row["source_key"]) == key), None)
             if previous:
                 db.execute("UPDATE sources SET first_seen=?,last_seen=? WHERE source_id=?",
-                           (min(previous[0], seen), max(previous[1], seen), source_id))
+                           (min(previous["first_seen"], seen), max(previous["last_seen"], seen), previous["source_id"]))
             else:
                 db.execute("INSERT INTO sources VALUES (?,?,?,?,?,?,?,?)", (source_id, name, kind, origin, source_url, key, seen, seen))
                 source_count += 1
@@ -676,12 +709,12 @@ def write_progress(db, data):
         key = nonempty(entry.get("source_key"), "discovery.source_key") if discovery else kind
         if kind == "comment":
             key = url(entry.get("source_key"), "comment.source_key")
+            # Validate the observed path before generic URL cleanup can hide malformed slashes.
+            parsed = urlsplit(entry["source_key"].strip())
+            if parsed.hostname.lower() not in INSTAGRAM_HOSTS or instagram_post_path(parsed.path) is None:
+                fail("comment.source_key 必须是具体 Instagram 帖子或 Reel URL")
         elif discovery and "://" in key:
             key = url(key, "discovery.source_key")
-        if kind == "comment":
-            parsed = urlsplit(key)
-            if parsed.hostname != "www.instagram.com" or not re.fullmatch(r"/(?:p|reel|tv)/[^/]+/", parsed.path):
-                fail("comment.source_key 必须是具体 Instagram 帖子或 Reel URL")
         reason = entry.get("reason", "")
         if not isinstance(reason, str) or (state == "unavailable" and not reason.strip()):
             fail("reason 必须是文本；unavailable 必须说明原因")
