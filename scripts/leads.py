@@ -1006,6 +1006,10 @@ def parser():
 
 
 def main(argv=None):
+    # Output is UTF-8 JSON regardless of the console code page (Windows defaults to cp1252/gbk).
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure") and (stream.encoding or "").lower().replace("-", "") != "utf8":
+            stream.reconfigure(encoding="utf-8")
     arguments = parser().parse_args(argv)
     db = None
     try:
