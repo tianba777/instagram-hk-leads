@@ -581,7 +581,7 @@ class LeadsTests(unittest.TestCase):
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
             self.assertEqual(leads.main(["--db", str(legacy), "migrate"]), 0)
-        self.assertEqual(json.loads(output.getvalue())["migrations_applied"], ["1->2"])
+        self.assertEqual(json.loads(output.getvalue())["migrations_applied"], ["1->2", "2->3"])
         with contextlib.closing(leads.connect(legacy)) as db:
             self.assertEqual(leads.schema_version(db), leads.CURRENT_SCHEMA)
             self.assertEqual(db.migrations_applied, [])

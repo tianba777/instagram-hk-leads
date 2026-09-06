@@ -18,6 +18,10 @@ python3 scripts/leads.py --db data/leads.sqlite merge old_name new_name --reason
 python3 scripts/leads.py --db data/leads.sqlite forget some_name --reason '本人要求删除'
 python3 scripts/leads.py --db data/leads.sqlite list
 python3 scripts/leads.py --db data/leads.sqlite list --status pending
+python3 scripts/leads.py --db data/leads.sqlite list --seeds
+python3 scripts/leads.py --db data/leads.sqlite seed-policy
+python3 scripts/leads.py --db data/leads.sqlite seed-policy --allow-female --reason '用户允许女生作为寻找男性的种子'
+python3 scripts/leads.py --db data/leads.sqlite seed-policy --disallow-female --reason '用户取消女生种子用途'
 python3 scripts/leads.py --db data/leads.sqlite next --limit 20
 python3 scripts/leads.py --db data/leads.sqlite next --include-unavailable
 python3 scripts/leads.py --db data/leads.sqlite progress progress.json
@@ -32,7 +36,7 @@ python3 scripts/leads.py --db data/leads.sqlite export --format markdown --outpu
 
 命令输出 JSON，失败时向 stderr 输出 `{"error":"..."}` 并返回退出码 2。除 `init` 外，数据库不存在时直接报错，不创建空文件；`init` 对本工具数据库可重复执行，对已有其他数据库或非空普通文件在写入前拒绝。一次 `ingest`、`review` 或 `progress` 文件中的修改是一个事务，其中任何一项无效都会全部回退。
 
-**结构版本**：`meta.schema_version` 当前为 2。打开旧版本数据库时，普通命令会拒绝并提示先运行 `migrate`（或 `init`）；升级按版本逐步执行、每一步一个事务并做外键检查，返回 `migrations_applied`。升级前请备份文件。比工具更新的数据库会被拒绝而不是降级。
+**结构版本**：`meta.schema_version` 当前为 3。v2 升 v3 增加女生种子政策及变更历史，默认关闭，不重写客户判断、反馈或批次快照。打开旧版本数据库时，普通命令会拒绝并提示先运行 `migrate`（或 `init`）；升级按版本逐步执行、每一步一个事务并做外键检查，返回 `migrations_applied`。升级前请备份文件。比工具更新的数据库会被拒绝而不是降级。
 
 `export` 默认只导出入选名单；显式加 `--all` 才包括待定和人工排除项。导出不覆盖已有文件，请为新版本选新文件名。
 
@@ -118,7 +122,17 @@ python3 scripts/leads.py --db data/leads.sqlite export --format markdown --outpu
 
 相同候选、入口种类、种子账号与入口标识的重复观察只更新首次／最近看到的时间，不增加来源条数；关注和粉丝各自采用固定入口标识。Instagram URL 会移除 `igsh`、`igshid`、`utm_*`、`fbclid`、`gclid` 等追踪参数，保留 `q`、`keywords`、`comment_id` 等业务参数。具体帖子链接同时支持根路径与用户名前缀：`/{username}/p/{shortcode}/` 归到 `/p/{shortcode}/`，`/{username}/reel/{shortcode}/` 归到 `/reel/{shortcode}/`；证据、来源和进度中的帖子地址先归一，再参与各自记录的去重；不同证据内容、观察时间或业务参数仍按相应字段处理。
 
-优先级按**不同的当前合格种子账号数**排序；同一种子多次评论，或通过其关注、粉丝、评论三种路径重复找到，仍只算一个独立种子。只有人工入选账号，或在当前模式下通过固定检查的账号，通过 `following` / `follower` / `comment` / `reply` 关系指向候选时才计入；`mention`、候选本人和未确认来源不加分。关系方向全部保留，来源数既不是居港概率，也不能把人工排除项救回名单。
+优先级按**不同的当前可用种子账号数**排序；同一种子多次评论，或通过其关注、粉丝、评论三种路径重复找到，仍只算一个独立种子。人工入选、当前模式下通过固定检查的客户，以及下文已启用的女生种子，通过 `following` / `follower` / `comment` / `reply` 指向候选时才计入；`mention`、候选本人和其他未确认来源不加分。关系方向全部保留，来源数既不是居港概率，也不能把人工排除项救回客户名单。
+
+### 女生仅作种子
+
+客户判定仍要求男性；种子用途通过 `seed_eligible`、`seed_only`、`seed_origin` 单独表达。新库及迁移后的 `allow_female` 默认 `false`，`seed-policy` 不带修改选项时只读。
+
+用户明确允许女生用于寻找男性后，执行 `seed-policy --allow-female --reason ...`。这项政策适用于已有及以后收到的人工反馈：只有当前客户结果为 `rejected`，且最近有效人工反馈的 `failed_criteria` 恰为 `["male"]`，才增加女生种子资格，来源标记 `human_female_feedback`。这不是模型根据名称或头像猜性别，也不代表女性已被确认满足其余客户条件；只是用户授权的寻找入口。拒绝原因为商业、假号、原因不明，或同时还有其他失败条件，不会因此成为种子。
+
+`list --seeds` 和 `next` 包含这些女生，`next.client_status` 仍明确为 `rejected`。默认客户 `export` 只导出 `accepted`，不会混入女生；批次、模式及人工通过计数也不受政策开关影响。`stats.seed_policy` 显示政策，`seed_eligible_count` 是当前可用种子总数，`seed_only_accounts` 单列女生用户名。
+
+政策变化必须有理由并记录旧值、新值和时间，重复提交同一值不增加事件。`--disallow-female` 关闭政策，或后续人工反馈纠正为商业号等不适用情况时，资格和关系权重随当前记录撤销，原有证据与历史不删除。改名、合并、本人删除沿用 `merge` / `forget`，不能留下失效的种子来源。
 
 ## 稳定编号与人工反馈
 
@@ -220,7 +234,7 @@ python3 scripts/leads.py --db data/leads.sqlite export --format markdown --outpu
 
 状态为 `pending`、`in_progress`、`done`、`unavailable`；`unavailable` 必须说明原因。`done` 仅表示本轮约定的可见范围已经处理，不保证已经枚举整个平台上的全部数据。发现需要查看的帖子时先为其建立 `comment` 待办，再结束本轮 `posts` 发现；否则尚未登记的帖子无法凭空出现在数据库里。
 
-`next` 只返回可继续扩展的入选账号，以及尚未完成的搜索／地点入口，不领取、不消耗、不完成任何任务。反复调用结果不变，直到显式写入进度或其他输入改变；未建立进度的入选账号默认有关注、粉丝、帖子发现三个待办。
+`next` 只返回可继续扩展的种子，以及尚未完成的搜索／地点入口，不领取、不消耗、不完成任何任务。反复调用结果不变，直到显式写入进度或其他输入改变；未建立进度的种子默认有关注、粉丝、帖子发现三个待办。女生入口带 `seed_only=true`，其 `client_status` 不会改成客户通过。
 
 不可用入口默认不安排自动重试；`next --include-unavailable` 可以只读查看这些入口，即使账号其他入口已经全部完成。搜索／地点的全部当前状态也在 `stats.discovery_progress` 中。原因解决后，通过 `progress` 将相应入口改回 `pending`；工具保留每次进度变化历史。
 
