@@ -9,7 +9,7 @@ description: Build a reviewed list of Hong Kong male personal Instagram accounts
 
 ## 开始前
 
-1. 读 [references/ego-browser.md](references/ego-browser.md)，按已安装版本的官方 skill 调用。本机已验证沿人工通过种子的关系找新候选、候选入库、人工反馈、规则保存和名单导出；自动模式及女生种子的浏览扩展尚未实测。已知可用环境直接开始读取，无须重复版本探测。
+1. 读 [references/ego-browser.md](references/ego-browser.md)，按已安装版本的官方 skill 调用。本机已验证沿人工通过种子的关系找新候选、候选入库、人工反馈、规则保存和名单导出；女生种子的部分关系和相关账号主页也已实际读取，尚无由该入口新增的人工确认客户，自动模式未实测。已知可用环境直接开始读取，无须重复版本探测。
 2. 确定数据库绝对路径（默认 `<用户工作目录>/instagram-hk-leads-data/leads.sqlite3`），写进交付说明；所有命令都显式传 `--db`。
 3. 新库 `init`；接手已有库先 `stats`、`batch --list`（找回未反馈的批次）、`next`。旧版本库先 `migrate`。
 4. 命令、JSON 格式见 [references/database.md](references/database.md)；填好的样子见 [examples/](examples/README.md)。
@@ -26,7 +26,7 @@ description: Build a reviewed list of Hong Kong male personal Instagram accounts
 
 第一人称食评、自称「个人部落格」或写「记录生活」不能单独排除商业用途；结合多篇内容、邀约推广、交易和导流信息核对。用户已经指出的商业号按人工结果排除，但不能因此把所有食物分享或合作帖账号一律判成商业号。
 
-区分观察时间与帖子发布时间：今天读到几年前的「我住喺香港」，只能记录为历史居住线索，不能使用 `explicit_residence` 表示现在仍居港。合作帖可能使用另一位共同作者的 URL；核对页面共同作者和正文实际作者，不能仅凭路径不同判假或把他人的现居自述归给候选。保存任务必要的短证据，不收集与筛选无关的个人敏感内容。
+区分观察时间、帖子发布时间与内容实际发生／拍摄日期：今天读到几年前的「我住喺香港」，只能记录为历史居住线索，不能使用 `explicit_residence` 表示现在仍居港。主页前三条可能均为置顶帖；按实际图标识别，不把网格位置当发布时间，也不固定跳过前三条，非置顶帖同样核对日期。补发旧照不能算作发布当天的生活；Roblox 等游戏里的路线和地名不能当作现实居港证据。合作帖可能使用另一位共同作者的 URL；核对页面共同作者和正文实际作者，不能仅凭路径不同判假或把他人的现居自述归给候选。保存任务必要的短证据，不收集与筛选无关的个人敏感内容。
 
 **实际判断：** 自动入选要求三项 `yes` 及每项可追溯证据；浏览量、局部人工反馈或规则已保存，都不能单独证明准确率或支持提高审核模式。当前模式、反馈与规则版本以实际数据库 `stats` 为准，不沿用实测说明里的历史进度。用 `stats.pending_gate_blockers` 看真实候选缺少哪些依据，资料不足时保留待审。
 
