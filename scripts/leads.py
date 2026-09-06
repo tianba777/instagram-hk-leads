@@ -15,7 +15,7 @@ from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 TOOL = "instagram-hk-leads"
-CURRENT_SCHEMA = 2
+CURRENT_SCHEMA = 3
 CRITERIA = ("personal", "male", "resident_hk")
 MODES = ("learning", "assisted", "automatic")
 SOURCE_KINDS = {"search", "place", "following", "follower", "comment", "reply", "mention"}
@@ -87,6 +87,11 @@ CREATE TABLE IF NOT EXISTS mode_events (
     id INTEGER PRIMARY KEY, old_mode TEXT NOT NULL, new_mode TEXT NOT NULL,
     reason TEXT NOT NULL, completed_batches_json TEXT NOT NULL, created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS seed_policy_events (
+    id INTEGER PRIMARY KEY, old_allow_female INTEGER NOT NULL CHECK(old_allow_female IN (0,1)),
+    new_allow_female INTEGER NOT NULL CHECK(new_allow_female IN (0,1)),
+    reason TEXT NOT NULL CHECK(length(trim(reason)) > 0), created_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS progress (
     username TEXT NOT NULL REFERENCES accounts(username), kind TEXT NOT NULL,
     source_key TEXT NOT NULL, status TEXT NOT NULL, cursor_json TEXT NOT NULL,
@@ -151,6 +156,14 @@ CREATE TABLE IF NOT EXISTS merge_events (
     reason TEXT NOT NULL, created_at TEXT NOT NULL
 );
 """,
+    2: """
+CREATE TABLE seed_policy_events (
+    id INTEGER PRIMARY KEY, old_allow_female INTEGER NOT NULL CHECK(old_allow_female IN (0,1)),
+    new_allow_female INTEGER NOT NULL CHECK(new_allow_female IN (0,1)),
+    reason TEXT NOT NULL CHECK(length(trim(reason)) > 0), created_at TEXT NOT NULL
+);
+INSERT INTO meta VALUES ('seed_allow_female', 'false');
+""",
 }
 
 
@@ -187,6 +200,17 @@ def timestamp(value, label):
     return parsed.astimezone(timezone.utc).isoformat()
 
 
+def instagram_post_path(path):
+    """Return one post path for both root links and links prefixed by their owner."""
+    match = re.fullmatch(r"/(?:(?P<owner>[A-Za-z0-9._]{1,30})/)?(?P<kind>p|reel|tv)/(?P<code>[A-Za-z0-9_-]+)/?", path)
+    if not match:
+        return None
+    owner = match["owner"]
+    if owner and (owner.lower() in RESERVED_PATHS or not owner.strip(".")):
+        return None
+    return f"/{match['kind']}/{match['code']}/"
+
+
 def url(value, label="url", optional=False):
     if optional and (value is None or value == ""):
         return ""
@@ -197,7 +221,8 @@ def url(value, label="url", optional=False):
     if parsed.hostname.lower() in INSTAGRAM_HOSTS:
         query = [(key, value) for key, value in parse_qsl(parsed.query, keep_blank_values=True)
                  if key.lower() not in {"igsh", "igshid", "fbclid", "gclid"} and not key.lower().startswith("utm_")]
-        return urlunsplit(("https", "www.instagram.com", parsed.path.rstrip("/") + "/", urlencode(sorted(query)), ""))
+        path = instagram_post_path(parsed.path) or parsed.path.rstrip("/") + "/"
+        return urlunsplit(("https", "www.instagram.com", path, urlencode(sorted(query)), ""))
     return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, parsed.query, ""))
 
 
@@ -316,6 +341,7 @@ def connect(path, initialize=False, allow_migration=False):
         db.execute("INSERT OR IGNORE INTO meta VALUES ('schema_version', ?)", (str(CURRENT_SCHEMA),))
         db.execute("INSERT OR IGNORE INTO meta VALUES ('tool', ?)", (TOOL,))
         db.execute("INSERT OR IGNORE INTO meta VALUES ('mode', 'learning')")
+        db.execute("INSERT OR IGNORE INTO meta VALUES ('seed_allow_female', 'false')")
         db.commit()
     if schema_version(db) != CURRENT_SCHEMA:
         db.close()
@@ -325,6 +351,32 @@ def connect(path, initialize=False, allow_migration=False):
 
 def current_mode(db):
     return db.execute("SELECT value FROM meta WHERE key='mode'").fetchone()[0]
+
+
+def current_seed_policy(db):
+    return {"allow_female": db.execute("SELECT value FROM meta WHERE key='seed_allow_female'").fetchone()[0] == "true"}
+
+
+def set_seed_policy(db, allow_female=None, reason=None):
+    """Change discovery eligibility only; never turn a rejected account into a client."""
+    previous = current_seed_policy(db)["allow_female"]
+    if allow_female is not None:
+        if type(allow_female) is not bool:
+            fail("seed-policy allow_female 必须是布尔值")
+        reason = nonempty(reason, "seed-policy --reason")
+    changed = allow_female is not None and allow_female != previous
+    if changed:
+        db.execute("UPDATE meta SET value=? WHERE key='seed_allow_female'", (dump(allow_female),))
+        db.execute("INSERT INTO seed_policy_events (old_allow_female,new_allow_female,reason,created_at) VALUES (?,?,?,?)",
+                   (int(previous), int(allow_female), reason, now()))
+    events = []
+    for row in db.execute("SELECT * FROM seed_policy_events ORDER BY id"):
+        event = dict(row)
+        for key in ("old_allow_female", "new_allow_female"):
+            event[key] = bool(event[key])
+        events.append(event)
+    return {**current_seed_policy(db), "changed": changed, "events": events,
+            "note": "女生仅可作为寻找客户的种子，仍不进入男性客户名单；只采纳最新人工反馈中仅 male 不符合的账号。"}
 
 
 def latest_rule_version(db):
@@ -419,6 +471,19 @@ def account_views(db):
     mode = current_mode(db)
     rows = db.execute("SELECT * FROM accounts").fetchall()
     states = {r["username"]: status(r, mode) for r in rows}
+    # Gender-only human rejection is discovery permission, not a change to client criteria.
+    latest_reviews = {r["username"]: r for r in db.execute(
+        "SELECT r.* FROM reviews r WHERE r.id=(SELECT MAX(rr.id) FROM reviews rr WHERE rr.username=r.username)")}
+    allow_female = current_seed_policy(db)["allow_female"]
+    seed_origins = {}
+    for row in rows:
+        name = row["username"]
+        latest = latest_reviews.get(name)
+        if states[name][0] == "accepted":
+            seed_origins[name] = "accepted_client"
+        elif (allow_female and states[name][0] == "rejected" and latest
+              and latest["decision"] == "rejected" and json.loads(latest["failed_criteria_json"]) == ["male"]):
+            seed_origins[name] = "human_female_feedback"
     all_sources = {}
     for source in db.execute("SELECT * FROM sources ORDER BY first_seen, source_id"):
         all_sources.setdefault(source["username"], []).append(dict(source))
@@ -431,13 +496,16 @@ def account_views(db):
         item["assessment"] = json.loads(item.pop("assessment_json"))
         item["evidence"] = json.loads(item.pop("evidence_json"))
         item["status"], item["decision_origin"] = states[row["username"]]
+        item["seed_origin"] = seed_origins.get(row["username"])
+        item["seed_eligible"] = item["seed_origin"] is not None
+        item["seed_only"] = item["seed_eligible"] and item["status"] != "accepted"
         item["model_eligible"], item["model_gate_reasons"], item["model_gate_blockers"] = model_gate(item["assessment"], item["evidence"])
         item["sources"] = all_sources.get(row["username"], [])
-        # Only confirmed accounts reached through a real relation count as seeds; `mention` is a lead, not a relation.
+        # Count eligible, distinct relation origins; repeated paths and mentions are not extra seeds.
         seeds = sorted({s["source_account"] for s in item["sources"]
                         if s["kind"] in RELATION_KINDS
                         and s["source_account"] != row["username"]
-                        and states.get(s["source_account"], (None,))[0] == "accepted"})
+                        and s["source_account"] in seed_origins})
         item["independent_seed_count"] = len(seeds)
         item["independent_seeds"] = seeds
         history = auto_rows.get(row["username"], [])
@@ -472,6 +540,13 @@ def ingest(db, data):
         evidence = incoming_evidence if has_assessment or not existing else json.loads(existing["evidence_json"])
         assessment_hash = digest([assessment, evidence])
         changed = not existing or existing["assessment_hash"] != assessment_hash
+        if existing and changed:
+            previous_hash = digest([json.loads(existing["assessment_json"]),
+                                    normalize_evidence(json.loads(existing["evidence_json"]))])
+            if assessment_hash == previous_hash:
+                # URL spelling alone must not invalidate a previous judgment or its batch review.
+                assessment_hash = existing["assessment_hash"]
+                changed = False
         observed = now()
         if not existing:
             db.execute("INSERT INTO accounts (username,profile_url,assessment_json,evidence_json,assessment_hash,created_at,updated_at,ig_user_id) VALUES (?,?,?,?,?,?,?,?)",
@@ -490,9 +565,18 @@ def ingest(db, data):
         manual = existing["manual_decision"] if existing else None
         if mode != "learning" and not manual and model_gate(assessment, evidence)[0]:
             auto_count += record_auto_acceptance(db, name, assessment_hash, "ingest")
+        known_evidence = set()
+        if incoming_evidence:
+            previous_evidence = [dict(row) for row in db.execute(
+                "SELECT criterion,signal,text,url,observed_at FROM evidence WHERE username=?", (name,))]
+            known_evidence = {digest([name, entry]) for entry in normalize_evidence(previous_evidence)}
         for entry in incoming_evidence:
+            evidence_id = digest([name, entry])
+            if evidence_id in known_evidence:
+                continue
             evidence_count += db.execute("INSERT OR IGNORE INTO evidence VALUES (?,?,?,?,?,?,?)",
-                                         (digest([name, entry]), name, entry["criterion"], entry["signal"], entry["text"], entry["url"], entry["observed_at"])).rowcount
+                                         (evidence_id, name, entry["criterion"], entry["signal"], entry["text"], entry["url"], entry["observed_at"])).rowcount
+            known_evidence.add(evidence_id)
         values = incoming.get("sources", [])
         if not isinstance(values, list):
             fail("sources 必须是列表")
@@ -509,10 +593,15 @@ def ingest(db, data):
                 key = url(key, "sources.source_key")
             seen = timestamp(source.get("observed_at"), "sources.observed_at")
             source_id = digest([name, kind, origin, key])
-            previous = db.execute("SELECT first_seen,last_seen FROM sources WHERE source_id=?", (source_id,)).fetchone()
+            previous = db.execute("SELECT source_id,first_seen,last_seen FROM sources WHERE source_id=?", (source_id,)).fetchone()
+            if previous is None and "://" in key:
+                # Keep legacy source rows and their history; only compare equivalent URLs in memory.
+                previous = next((row for row in db.execute(
+                    "SELECT source_id,source_key,first_seen,last_seen FROM sources WHERE username=? AND kind=? AND source_account=?",
+                    (name, kind, origin)) if "://" in row["source_key"] and url(row["source_key"]) == key), None)
             if previous:
                 db.execute("UPDATE sources SET first_seen=?,last_seen=? WHERE source_id=?",
-                           (min(previous[0], seen), max(previous[1], seen), source_id))
+                           (min(previous["first_seen"], seen), max(previous["last_seen"], seen), previous["source_id"]))
             else:
                 db.execute("INSERT INTO sources VALUES (?,?,?,?,?,?,?,?)", (source_id, name, kind, origin, source_url, key, seen, seen))
                 source_count += 1
@@ -676,12 +765,12 @@ def write_progress(db, data):
         key = nonempty(entry.get("source_key"), "discovery.source_key") if discovery else kind
         if kind == "comment":
             key = url(entry.get("source_key"), "comment.source_key")
+            # Validate the observed path before generic URL cleanup can hide malformed slashes.
+            parsed = urlsplit(entry["source_key"].strip())
+            if parsed.hostname.lower() not in INSTAGRAM_HOSTS or instagram_post_path(parsed.path) is None:
+                fail("comment.source_key 必须是具体 Instagram 帖子或 Reel URL")
         elif discovery and "://" in key:
             key = url(key, "discovery.source_key")
-        if kind == "comment":
-            parsed = urlsplit(key)
-            if parsed.hostname != "www.instagram.com" or not re.fullmatch(r"/(?:p|reel|tv)/[^/]+/", parsed.path):
-                fail("comment.source_key 必须是具体 Instagram 帖子或 Reel URL")
         reason = entry.get("reason", "")
         if not isinstance(reason, str) or (state == "unavailable" and not reason.strip()):
             fail("reason 必须是文本；unavailable 必须说明原因")
@@ -717,7 +806,7 @@ def discovery_views(db):
 def next_accounts(db, limit, include_unavailable=False):
     result = []
     for account in account_views(db):
-        if account["status"] != "accepted":
+        if not account["seed_eligible"]:
             continue
         entries = {}
         for row in db.execute("SELECT * FROM progress WHERE username=? ORDER BY kind,source_key", (account["username"],)):
@@ -730,6 +819,8 @@ def next_accounts(db, limit, include_unavailable=False):
         unavailable = [entry for entry in entries.values() if entry["status"] == "unavailable"]
         if pending or (include_unavailable and unavailable):
             result.append({"username": account["username"], "profile_url": account["profile_url"], "decision_origin": account["decision_origin"],
+                           "status": account["status"], "client_status": account["status"],
+                           "seed_eligible": account["seed_eligible"], "seed_only": account["seed_only"], "seed_origin": account["seed_origin"],
                            "independent_seed_count": account["independent_seed_count"], "entries": pending,
                            "unavailable_entries": unavailable})
             if len(result) >= limit:
@@ -815,11 +906,12 @@ def merge(db, old_name, new_name, reason):
             fail("两个账号记录了不同的 ig_user_id，不是同一个人，拒绝合并")
         if old["manual_decision"] and new["manual_decision"] and old["manual_decision"] != new["manual_decision"]:
             fail("两个账号的人工结论不同；请先用 review 统一结论，再合并")
-        # Keep the most recent assessment; keep whichever manual decision exists.
+        # Keep the most recent assessment and matching latest human conclusion/reason.
         keep_old_assessment = old["updated_at"] > new["updated_at"]
         assessment_json = old["assessment_json"] if keep_old_assessment else new["assessment_json"]
         evidence_json = old["evidence_json"] if keep_old_assessment else new["evidence_json"]
-        manual = (old["manual_decision"], old["manual_reason"], old["manual_at"]) if old["manual_decision"] and not new["manual_decision"] \
+        manual = (old["manual_decision"], old["manual_reason"], old["manual_at"]) if old["manual_decision"] and (
+            not new["manual_decision"] or (old["manual_at"] or "") > (new["manual_at"] or "")) \
             else (new["manual_decision"], new["manual_reason"], new["manual_at"])
         db.execute("UPDATE accounts SET assessment_json=?,evidence_json=?,assessment_hash=?,created_at=?,updated_at=?,"
                    "manual_decision=?,manual_reason=?,manual_at=?,ig_user_id=COALESCE(ig_user_id,?) WHERE username=?",
@@ -953,6 +1045,9 @@ def stats(db):
         latest_rule["based_on_batches"] = json.loads(latest_rule.pop("based_on_batches_json"))
     batches = list_batches(db)
     return {"mode": current_mode(db), "schema_version": CURRENT_SCHEMA, "accounts": len(accounts), "decisions": counts,
+            "seed_policy": current_seed_policy(db),
+            "seed_eligible_count": sum(a["seed_eligible"] for a in accounts),
+            "seed_only_accounts": sorted(a["username"] for a in accounts if a["seed_only"]),
             "sources": db.execute("SELECT COUNT(*) FROM sources").fetchone()[0],
             "evidence": db.execute("SELECT COUNT(*) FROM evidence").fetchone()[0],
             "open_batches": batches["open_batches"],
@@ -983,6 +1078,7 @@ def parser():
     batch.add_argument("--include-reviewed", action="store_true", help="创建人工复核批次，保留以前全部反馈")
     listing = sub.add_parser("list")
     listing.add_argument("--status", choices=("accepted", "rejected", "pending"))
+    listing.add_argument("--seeds", action="store_true", help="仅展示可用于寻找客户的种子；女生种子仍标记为 rejected 客户")
     exporting = sub.add_parser("export")
     exporting.add_argument("--format", choices=("csv", "json", "markdown"), required=True)
     exporting.add_argument("--output", required=True)
@@ -993,6 +1089,11 @@ def parser():
     mode = sub.add_parser("mode")
     mode.add_argument("desired", choices=MODES, nargs="?")
     mode.add_argument("--reason")
+    seed_policy = sub.add_parser("seed-policy", help="读取或修改种子策略，不更改客户标准和审核方式")
+    policy_choice = seed_policy.add_mutually_exclusive_group()
+    policy_choice.add_argument("--allow-female", dest="allow_female", action="store_const", const=True, default=None)
+    policy_choice.add_argument("--disallow-female", dest="allow_female", action="store_const", const=False)
+    seed_policy.add_argument("--reason")
     forgetting = sub.add_parser("forget", help="删除一个账号的全部记录（个人资料删除请求）")
     forgetting.add_argument("username")
     forgetting.add_argument("--reason")
@@ -1038,12 +1139,16 @@ def main(argv=None):
                 result = account_views(db)
                 if arguments.status:
                     result = [item for item in result if item["status"] == arguments.status]
+                if arguments.seeds:
+                    result = [item for item in result if item["seed_eligible"]]
             elif command == "export":
                 result = export_accounts(db, arguments.output, arguments.format, arguments.all)
             elif command == "next":
                 result = next_accounts(db, arguments.limit, arguments.include_unavailable)
             elif command == "mode":
                 result = set_mode(db, arguments.desired, arguments.reason)
+            elif command == "seed-policy":
+                result = set_seed_policy(db, arguments.allow_female, arguments.reason)
             elif command == "forget":
                 result = forget(db, arguments.username, arguments.reason, arguments.unblock)
             elif command == "merge":

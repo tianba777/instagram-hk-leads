@@ -2,23 +2,44 @@
 
 [![tests](https://github.com/tianba777/instagram-hk-leads/actions/workflows/tests.yml/badge.svg)](https://github.com/tianba777/instagram-hk-leads/actions/workflows/tests.yml)
 
-供 AI agent 使用的 Instagram 名单整理 skill：从搜索或地点发现候选账号，沿合格种子的关注、粉丝和粤语评论继续寻找，并用本地 SQLite 保存证据、审核反馈和进度。
+供 AI agent 使用的 Instagram 名单整理 skill：从搜索或地点发现候选账号，沿可用种子的关注、粉丝和粤语评论继续寻找，并用本地 SQLite 保存证据、审核反馈和进度。
 
-默认目标为在香港生活的男性普通个人账号。只交付名单，不发送私信，不执行关注、点赞或评论。
+默认目标为在香港生活的男性普通个人账号。只交付名单，不发送私信，不执行关注、点赞或评论。客户与种子分别记录：用户允许后，已人工确认的女生可用于寻找男性，仍不进入男性客户名单。
 
 ## 当前状态
 
 | 部分 | 状态 |
 | --- | --- |
-| SQLite 记账工具 `scripts/leads.py` | 已实现，28 个本地测试覆盖；CI 在 Linux / Windows × Python 3.9 / 3.13 上运行 |
+| SQLite 记账工具 `scripts/leads.py` | 已实现，45 个本地测试通过；CI 配置覆盖 Linux / Windows × Python 3.9 / 3.13 |
 | 去重、固定编号批次、人工反馈历史、规则版本、三种审核模式、进度记录、CSV / JSON / Markdown 导出 | 已实现 |
 | `batch --list` 找回未反馈批次、`ig_user_id` 防改名重复、`merge` 改名合并、`forget` 删除请求、自动入选审计、按条件统计人工否决、结构版本迁移 | 已实现（v2） |
-| ego-browser 连接、Instagram 页面实际读取、完整找人流程 | **未实测**。`references/ego-browser.md` 里的示例只是文档契约，首次实测清单见该文件 |
+| 女生仅作种子的政策、变更历史、独立来源计数及客户导出分离 | 已实现（v3）；本机数据库升级、3个女生种子进入寻找队列及客户导出排除均验证 |
+| ego-browser 连接、搜索建议、候选主页和帖子 | 已在真实 Instagram 页面读取；首页帖子加载失败时，搜索及候选主页仍可使用 |
+| 地点、关注、粉丝及评论入口 | 已读取地点页帖子、7名人工通过种子的关系入口、粤语评论及评论者主页；完整列表和回复展开未验证 |
+| 实际候选、证据、来源与进度写入 SQLite | 已审核的前两批共37账号；24人工通过、8客户排除、5待定；3名女生仅作种子，可用种子共27，自动通过0 |
+| 真实人工反馈、规则保存、通过名单与种子读取 | 两批37条反馈已保存，规则v3；客户名单与仅作种子的女生分别读取和导出 |
+| 关系扩展与自动模式 | 已沿人工通过种子发现新候选；女生种子的部分关系和相关账号主页已实测，尚无由该入口新增的人工确认客户；自动模式仍未实测，见 [浏览器实测记录](references/ego-browser.md) |
 | 多 agent 并行、第三方指纹浏览器 | 未实现，也不计划在没有实测数据前做 |
 
-## 一个诚实的预期
+## 真实运行发现与修复
 
-筛选目标里的 `male` 要求本人公开自述，而绝大多数 Instagram 简介不写性别。所以在真实数据上，自动入选（三项 `yes` + 每项可追溯证据）预计很少触发，前几批以人工审核为主是正常的。`stats.pending_gate_blockers` 会统计待审账号被挡在哪一项，审过两三批后用它来决定要不要调整目标，而不是凭感觉。
+2026-09-05 使用 ego-browser 读取 Instagram 时，实际帖子链接带有用户名前缀，例如 `/{username}/p/{shortcode}/` 或 `/{username}/reel/{shortcode}/`。原工具只接受根路径形式，导致保存评论进度失败；现在会把同一帖子的两种链接归到同一个地址，保留判断所需的查询参数并去重。修复已通过真实评论进度写入、读回和 37 个本地测试验证，未改动数据库结构版本。
+
+真实旧数据库的副本还复现了重复证据问题：同样两条旧链接证据重导，计数从 31 变为 33。已补齐旧记录比对，复验保持 31 条；仅链接形式变化也不会新增判断或改变原审核批次。旧记录保留原地址和编号，不执行全库回写。
+
+搜索建议的首屏、页面显示的关注总数以及实际读到的去重人数分别记录；不会把首页框架或 HTTP 200 当作找人完成。一个地点页已能加载并显示 12 个帖子入口，不能因为首页异常就判断地点不可用。上述数量只说明本次验证范围，不是项目的搜索量或层数上限。
+
+首次浏览查看 28 个主页和 12 个帖子详情，当时只有 1 个候选的模型判断具备三项依据。已把历史居住自述的日期核对、私密账号处理、轮播图标误判和 Facebook 留言提示区分补入 skill；这些是浏览实测后的操作修正，与随后收到的人工反馈分开记录。
+
+后续实际观察到主页前三条均为置顶帖，已补充逐帖核对图标和日期的规则：不把网格位置当发布时间，不固定跳过前三条，非置顶帖也不直接认作近期内容。正文拍摄日期可能早于发布日期，游戏中也会出现真实地名，已增加旧照和 Roblox 场景的区分规则。
+
+## 审核与学习
+
+前期人工审核轮次不限。自动入选要求个人账号、男性、现居香港三项均有可追溯依据；公开信息不足就保留待核实。`stats.pending_gate_blockers` 可以查看尚未人工处理的候选缺少哪些依据；实际能自动通过多少人，需要用真实审核反馈验证，不能由浏览量或测试数量推算。
+
+截至2026-09-06，两批37个候选已全部收到人工意见，结果为24通过、8客户排除、5不确定，规则更新到v3。本轮暴露了把第一人称食评误认成普通个人用途的问题；食物主题、个人标签或合作帖都不能单独决定是否商业。两个完整批次不等于准确率已足够，当前保持 `learning`。
+
+女生可作种子的授权使用独立 `seed-policy` 保存。当前仅因男性条件被人工排除的3个账号进入寻找队列，但默认客户导出仍只有24人。政策关闭或后续人工指出商业用途等其他问题时，种子资格和来源权重随之撤销。
 
 ## 寻找方式
 
@@ -27,15 +48,18 @@ flowchart TD
     A[搜索或地点入口] --> B[候选账号与来源证据]
     B --> C[个人账号 / 男性 / 居港判断]
     C --> D[人工审核或按已验证规则判断]
-    D --> E[通过名单与新种子]
-    D --> F[排除或保留不确定]
-    E --> G[关注 / 粉丝 / 帖子粤语评论]
+    D --> E[男性客户名单]
+    D --> F[客户排除或不确定]
+    D --> I[用户允许且人工确认的女生]
+    E --> J[可用种子]
+    I --> J
+    J --> G[关注 / 粉丝 / 帖子粤语评论]
     G --> B
     D --> H[保存真实人工反馈与规则版本]
     H --> C
 ```
 
-首批审核目标是 20 个候选，不是搜索总量或层数上限。不同合格种子重复指向同一人会提高查看优先级，但出现次数不能代替身份和居港证据，也不能覆盖用户的排除决定。“学习”指保存人工反馈、总结筛选规则及调整寻找顺序，不是训练底层模型。
+首批审核目标是 20 个候选，不是搜索总量或层数上限。不同可用种子重复指向同一人会提高查看优先级，但出现次数不能代替身份和居港证据，也不能覆盖用户的排除决定。“学习”指保存人工反馈、总结筛选规则及调整寻找顺序，不是训练底层模型。
 
 ## 使用
 
@@ -59,10 +83,12 @@ python3 scripts/leads.py --db $DB stats
 python3 scripts/leads.py --db $DB batch --limit 20
 python3 scripts/leads.py --db $DB batch --list     # 接手时找回未反馈的批次
 python3 scripts/leads.py --db $DB next
+python3 scripts/leads.py --db $DB seed-policy          # 查看女生种子政策
+python3 scripts/leads.py --db $DB list --seeds
 python3 scripts/leads.py --db $DB export --format csv --output ../instagram-hk-leads-data/accepted.csv
 ```
 
-从 v1 数据库升级：`python3 scripts/leads.py --db $DB migrate`（先备份）。
+从 v1 / v2 数据库升级到 v3：`python3 scripts/leads.py --db $DB migrate`（先备份）。
 
 完整命令、JSON 格式见 [references/database.md](references/database.md)；一轮流程填好后长什么样见 [examples/](examples/README.md)（全部虚构数据）。
 
@@ -71,11 +97,11 @@ python3 scripts/leads.py --db $DB export --format csv --output ../instagram-hk-l
 | 文件 | 用途 |
 | --- | --- |
 | [SKILL.md](SKILL.md) | agent 的筛选标准、寻找循环、模式和边界 |
-| [references/ego-browser.md](references/ego-browser.md) | 浏览器调用、版本差异、首次实测清单 |
+| [references/ego-browser.md](references/ego-browser.md) | 浏览器调用、真实页面读取经验与尚未验证的范围 |
 | [references/database.md](references/database.md) | 命令、JSON 格式及数据库行为 |
 | [examples/](examples/README.md) | 虚构的端到端示例输入与输出 |
 | [scripts/leads.py](scripts/leads.py) | Python / SQLite 命令行工具 |
-| [tests/test_leads.py](tests/test_leads.py) | 使用合成记录和临时数据库的测试 |
+| [tests/](tests/) | 使用合成记录和临时数据库的测试，含真实页面发现的帖子链接形式 |
 
 ## 测试
 
@@ -83,7 +109,7 @@ python3 scripts/leads.py --db $DB export --format csv --output ../instagram-hk-l
 python3 -B -m unittest discover -s tests -v
 ```
 
-测试不访问 Instagram，也不使用真实客户记录；测试通过不能代替浏览器实际运行验证。
+这45个测试不访问Instagram，也不使用真实客户记录；它们验证本地工具行为，包括女生种子不会进入客户导出、政策撤销、版本升级与改名删除。浏览器读取和真实反馈另行验证，不能由测试数量推算找人准确率。
 
 ## 数据与合规
 
